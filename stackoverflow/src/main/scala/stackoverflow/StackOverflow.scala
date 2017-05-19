@@ -276,9 +276,6 @@ class StackOverflow extends Serializable {
     ((comp1 / count).toInt, (comp2 / count).toInt)
   }
 
-
-
-
   //
   //
   //  Displaying results:
@@ -286,13 +283,18 @@ class StackOverflow extends Serializable {
   //
   def clusterResults(means: Array[(Int, Int)], vectors: RDD[(Int, Int)]): Array[(String, Double, Int, Int)] = {
     val closest = vectors.map(p => (findClosest(p, means), p))
-    val closestGrouped = closest.groupByKey()
+    val closestGrouped = closest.groupByKey().persist()
 
     val median = closestGrouped.mapValues { vs =>
-      val langLabel: String   = ??? // most common language in the cluster
-      val langPercent: Double = ??? // percent of the questions in the most common language
-      val clusterSize: Int    = ???
-      val medianScore: Int    = ???
+      // most common language in the cluster
+      val langIndex = vs.map(_._1).groupBy(x => x).mapValues(_.size).toSeq.sortBy(-_._2).map(_._1).head
+      val langLabel: String   = langs(langIndex)
+
+      // percent of the questions in the most common language
+      val langPercent: Double = vs.filter(_._1 == langIndex).size / vs.size
+      val clusterSize: Int    = vs.size
+      val sortedScores = vs.map(_._2).toArray.sorted
+      val medianScore: Int    = sortedScores(vs.size/2)
 
       (langLabel, langPercent, clusterSize, medianScore)
     }
