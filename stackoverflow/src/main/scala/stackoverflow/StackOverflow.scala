@@ -1,9 +1,9 @@
 package stackoverflow
 
-import org.apache.spark.SparkConf
-import org.apache.spark.SparkContext
+import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
+
 import annotation.tailrec
 import scala.reflect.ClassTag
 
@@ -78,54 +78,63 @@ class StackOverflow extends Serializable {
 
   /** Group the questions and answers together */
   def groupedPostings(postings: RDD[Posting]): RDD[(Int, Iterable[(Posting, Posting)])] = {
-    val questions = postings.filter(_.postingType == 1).map(p => (p.id, p));
-    val answers = postings.filter(_.parentId.isDefined).map(p => (p.parentId.get, p));
-    questions.join(answers).groupByKey().persist()
-  }
+    def isValid(p: Posting): Boolean =
+      p.postingType == 1 || (p.postingType == 2 && p.parentId.isDefined)
 
+    val partitioned = postings.filter(isValid(_)).map(p => if (p.postingType == 1) (p.id, p) else (p.parentId.get, p))
+    val questions = partitioned.filter(_._2.postingType == 1)
+    val answers = partitioned.filter { case (_, p) => p.postingType == 2 && p.parentId.isDefined }
+    questions.join(answers).groupByKey()
+  }
 
   /** Compute the maximum score for each posting */
   def scoredPostings(grouped: RDD[(Int, Iterable[(Posting, Posting)])]): RDD[(Posting, Int)] = {
 
 //    def answerHighScore(as: Array[Posting]): Int = {
 //      var highScore = 0
-//          var i = 0
-//          while (i < as.length) {
-//            val score = as(i).score
-//                if (score > highScore)
-//                  highScore = score
-//                  i += 1
-//          }
+//      var i = 0
+//      while (i < as.length) {
+//        val score = as(i).score
+//            if (score > highScore)
+//              highScore = score
+//              i += 1
+//      }
 //      highScore
 //    }
 
-    grouped.mapValues { case qAndAs =>
-      val question = qAndAs.head._1
-      (question, qAndAs.map(_._2.score).max)
-    }.values
+    grouped.mapValues(qAndAs => {
+      val it = qAndAs.iterator
+      var maxScore = Int.MinValue
+      var item: (Posting,Posting) = null
+      while (it.hasNext) {
+        item = it.next
+        if (item._2.score > maxScore) maxScore = item._2.score
+      }
+      (item._1, maxScore)
+    }).values
   }
 
 
   /** Compute the vectors for the kmeans */
   def vectorPostings(scored: RDD[(Posting, Int)]): RDD[(Int, Int)] = {
     /** Return optional index of first language that occurs in `tags`. */
-    def firstLangInTag(tag: Option[String], ls: List[String]): Option[Int] = {
-      if (tag.isEmpty) None
-      else if (ls.isEmpty) None
-      else if (tag.get == ls.head) Some(0) // index: 0
-      else {
-        val tmp = firstLangInTag(tag, ls.tail)
-        tmp match {
-          case None => None
-          case Some(i) => Some(i + 1) // index i in ls.tail => index i+1
-        }
+    def firstLangInTag(tag: String, ls: List[String]): Option[Int] = {
+      @annotation.tailrec
+      def go(pos: Int, ls: List[String]): Option[Int] = {
+        if (ls.isEmpty) None
+        else if (tag == ls.head) Some(pos)
+        else go(pos + 1, ls.tail)
       }
+      go(0, ls)
     }
 
     scored
-      .map { case (question, score) => (firstLangInTag(question.tags, langs), score) }
-      .filter { case (o, _) => o.isDefined }
-      .map { case (o, score) => (o.get * langSpread, score)}
+      .map { case (question, score) => {
+        val lang = question.tags.flatMap(firstLangInTag(_, langs)).getOrElse(-1)
+        if (lang == -1) (-1, score) else (lang*langSpread, score)
+      }}
+      .filter { case (l, _) => l != -1 }
+      .persist()
   }
 
 
@@ -181,14 +190,28 @@ class StackOverflow extends Serializable {
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
 
-    val addVector = (acc: ((Int, Int), Int), v: (Int, Int)) => ((acc._1._1 + v._1, acc._1._2 + v._2), acc._2 + 1)
-    val combine = (acc1: ((Int, Int), Int), acc2: ((Int, Int), Int)) => ((acc1._1._1 + acc2._1._1, acc1._1._2 + acc2._1._2), acc1._2 + acc2._2)
-    val newMeans = vectors.map(v => (findClosest(v, means), v)).aggregateByKey(((0, 0), 0))(addVector, combine).values.map {
-      case ((x, y), n) => (x/n, y/n)
-    }.collect
+//    val addVector = (acc: ((Int, Int), Int), v: (Int, Int)) => ((acc._1._1 + v._1, acc._1._2 + v._2), acc._2 + 1)
+//    val combine = (acc1: ((Int, Int), Int), acc2: ((Int, Int), Int)) => ((acc1._1._1 + acc2._1._1, acc1._1._2 + acc2._1._2), acc1._2 + acc2._2)
+//    val partitioned = vectors.map(v => (findClosest(v, means), v)).persist;
+//    val collected = partitioned.aggregateByKey(((0, 0), 0))(addVector, combine).collectAsMap()
+//    val newCenters = collected.mapValues {
+//      case ((x, y), n) => (x/n, y/n)
+//    }
+//    val newMeans = (0 until means.length).map { i => newCenters.get(i).getOrElse(means(i))}.toArray
 
+    //    val kMeansPartitioner = new Partitioner {
+//      override def numPartitions: Int = means.length
+//      override def getPartition(key: Any): Int = key.hashCode()
+//    }
+//
+    val newCentroids = vectors.map(v => (findClosest(v, means), v)).groupByKey().mapValues(vs => averageVectors(vs)).collectAsMap()
+    val newMeans = (0 until means.length).map { i => newCentroids.get(i).getOrElse(means(i))}.toArray
 
-    //val newMeans = means.clone() // you need to compute newMeans
+    //if (debug) {
+      println(s"Old means length: ${means.length}, new means length: ${newMeans.length}")
+    //}
+
+//    val newMeans = means.clone() // you need to compute newMeans
 
     // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
@@ -212,9 +235,6 @@ class StackOverflow extends Serializable {
       newMeans
     }
   }
-
-
-
 
   //
   //
@@ -287,15 +307,19 @@ class StackOverflow extends Serializable {
 
     val median = closestGrouped.mapValues { vs =>
       // most common language in the cluster
-      val langIndex = vs.map(_._1).groupBy(x => x).mapValues(_.size).toSeq.sortBy(-_._2).map(_._1).head
-      val langLabel: String   = langs(langIndex)
+      val langIndex = vs.toStream.map(_._1).groupBy(x => x).mapValues(_.size).toSeq.sortBy(-_._2).map(_._1).head
+      val langLabel: String   = langs(langIndex/langSpread)
 
       // percent of the questions in the most common language
-      val langPercent: Double = vs.filter(_._1 == langIndex).size / vs.size
       val clusterSize: Int    = vs.size
+      val langPercent: Double = vs.filter(_._1 == langIndex).size * 100 / clusterSize
       val sortedScores = vs.map(_._2).toArray.sorted
-      val medianScore: Int    = sortedScores(vs.size/2)
-
+      val medianScore: Int = {
+        if (sortedScores.size % 2 == 0)
+          (sortedScores(vs.size/2) + sortedScores(vs.size/2 - 1)) / 2
+        else
+          sortedScores(vs.size/2)
+      }
       (langLabel, langPercent, clusterSize, medianScore)
     }
 
