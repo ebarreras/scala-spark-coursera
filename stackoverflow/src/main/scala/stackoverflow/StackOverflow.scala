@@ -54,7 +54,7 @@ class StackOverflow extends Serializable {
   def kmeansEta: Double = 20.0D
 
   /** K-means parameter: Maximum iterations */
-  def kmeansMaxIterations = 120
+  def kmeansMaxIterations = 1
 
 
   //
@@ -89,28 +89,9 @@ class StackOverflow extends Serializable {
 
   /** Compute the maximum score for each posting */
   def scoredPostings(grouped: RDD[(Int, Iterable[(Posting, Posting)])]): RDD[(Posting, Int)] = {
-
-//    def answerHighScore(as: Array[Posting]): Int = {
-//      var highScore = 0
-//      var i = 0
-//      while (i < as.length) {
-//        val score = as(i).score
-//            if (score > highScore)
-//              highScore = score
-//              i += 1
-//      }
-//      highScore
-//    }
-
     grouped.mapValues(qAndAs => {
-      val it = qAndAs.iterator
-      var maxScore = Int.MinValue
-      var item: (Posting,Posting) = null
-      while (it.hasNext) {
-        item = it.next
-        if (item._2.score > maxScore) maxScore = item._2.score
-      }
-      (item._1, maxScore)
+      val bestAnswer = qAndAs.toStream.reduceLeft((ba, a) => (ba._1, if (ba._2.score > a._2.score) ba._2 else a._2))
+      (bestAnswer._1, bestAnswer._2.score)
     }).values
   }
 
@@ -180,7 +161,6 @@ class StackOverflow extends Serializable {
     res
   }
 
-
   //
   //
   //  Kmeans method:
@@ -190,30 +170,18 @@ class StackOverflow extends Serializable {
   /** Main kmeans computation */
   @tailrec final def kmeans(means: Array[(Int, Int)], vectors: RDD[(Int, Int)], iter: Int = 1, debug: Boolean = false): Array[(Int, Int)] = {
 
-//    val addVector = (acc: ((Int, Int), Int), v: (Int, Int)) => ((acc._1._1 + v._1, acc._1._2 + v._2), acc._2 + 1)
-//    val combine = (acc1: ((Int, Int), Int), acc2: ((Int, Int), Int)) => ((acc1._1._1 + acc2._1._1, acc1._1._2 + acc2._1._2), acc1._2 + acc2._2)
+    val addVector = (acc: ((Int, Int), Int), v: (Int, Int)) => ((acc._1._1 + v._1, acc._1._2 + v._2), acc._2 + 1)
+    val combine = (acc1: ((Int, Int), Int), acc2: ((Int, Int), Int)) => ((acc1._1._1 + acc2._1._1, acc1._1._2 + acc2._1._2), acc1._2 + acc2._2)
 //    val partitioned = vectors.map(v => (findClosest(v, means), v)).persist;
-//    val collected = partitioned.aggregateByKey(((0, 0), 0))(addVector, combine).collectAsMap()
-//    val newCenters = collected.mapValues {
-//      case ((x, y), n) => (x/n, y/n)
-//    }
-//    val newMeans = (0 until means.length).map { i => newCenters.get(i).getOrElse(means(i))}.toArray
-
-    //    val kMeansPartitioner = new Partitioner {
-//      override def numPartitions: Int = means.length
-//      override def getPartition(key: Any): Int = key.hashCode()
-//    }
-//
-    val newCentroids = vectors.map(v => (findClosest(v, means), v)).groupByKey().mapValues(vs => averageVectors(vs)).collectAsMap()
+    val collected = vectors.map(v => (findClosest(v, means), v)).aggregateByKey(((0, 0), 0))(addVector, combine).collectAsMap()
+    val newCentroids = collected.mapValues {
+      case ((x, y), n) => (x/n, y/n)
+    }
     val newMeans = (0 until means.length).map { i => newCentroids.get(i).getOrElse(means(i))}.toArray
 
-    //if (debug) {
-      println(s"Old means length: ${means.length}, new means length: ${newMeans.length}")
-    //}
+//    val newCentroids = vectors.map(v => (findClosest(v, means), v)).groupByKey().mapValues(vs => averageVectors(vs)).collectAsMap()
+//    val newMeans = (0 until means.length).map { i => newCentroids.get(i).getOrElse(means(i))}.toArray
 
-//    val newMeans = means.clone() // you need to compute newMeans
-
-    // TODO: Fill in the newMeans array
     val distance = euclideanDistance(means, newMeans)
 
     if (debug) {
