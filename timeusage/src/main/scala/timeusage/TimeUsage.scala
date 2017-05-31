@@ -141,11 +141,11 @@ object TimeUsage {
     otherColumns: List[Column],
     df: DataFrame
   ): DataFrame = {
-    val workingStatusProjection: Column = ???
-    val sexProjection: Column = ???
-    val ageProjection: Column = ???
+    val workingStatusProjection: Column = udf((x: Double) => if (1 <= x && x < 3) "working" else "not working").apply(col("telfs"))
+    val sexProjection: Column = udf((x: Double) => if (x == 1) "male" else "female").apply(col("tesex"))
+    val ageProjection: Column = udf((x: Double) => if (x <= 22) "young" else if (x <= 55) "active" else "elder").apply(col("teage"))
 
-    val primaryNeedsProjection: Column = ???
+    val primaryNeedsProjection: Column = col
     val workProjection: Column = ???
     val otherProjection: Column = ???
     df
