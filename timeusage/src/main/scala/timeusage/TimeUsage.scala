@@ -6,6 +6,7 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions.GenericRowWithSchema
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.expressions.scalalang.typed.{avg => typedAvg}
 
 /** Main class */
 object TimeUsage {
@@ -173,7 +174,13 @@ object TimeUsage {
     * Finally, the resulting DataFrame should be sorted by working status, sex and age.
     */
   def timeUsageGrouped(summed: DataFrame): DataFrame = {
-    summed.groupBy('working, 'sex, 'age).agg(round(avg('primaryNeeds), 1).as("primaryNeeds"), round(avg('work), 1).as("work"), round(avg('other), 1).as("other"))
+    summed
+      .groupBy('working, 'sex, 'age)
+      .agg(
+        round(avg('primaryNeeds), 1).as("primaryNeeds"),
+        round(avg('work), 1).as("work"),
+        round(avg('other), 1).as("other"))
+      .orderBy('working, 'sex, 'age)
   }
 
   /**
@@ -192,7 +199,8 @@ object TimeUsage {
   def timeUsageGroupedSqlQuery(viewName: String): String =
       "select working, sex, age, round(avg(primaryNeeds), 1) as primaryNeeds, round(avg(work), 1) as work, round(avg(other), 1) as other " +
       "from " + viewName + " " +
-      "group by working, sex, age"
+      "group by working, sex, age " +
+      "order by working, sex, age"
 
   /**
     * @return A `Dataset[TimeUsageRow]` from the “untyped” `DataFrame`
@@ -223,11 +231,14 @@ object TimeUsage {
     * Hint: you should use the `groupByKey` and `typed.avg` methods.
     */
   def timeUsageGroupedTyped(summed: Dataset[TimeUsageRow]): Dataset[TimeUsageRow] = {
-    import org.apache.spark.sql.expressions.scalalang.typed
     summed
       .groupByKey(tu => (tu.working, tu.sex, tu.age))
-      .reduceGroups((acc, tu) => acc.copy(primaryNeeds = acc.primaryNeeds + tu.primaryNeeds, work = acc.work + tu.work, other = acc.other + tu.other))
-      .map(_._2)
+      .agg(
+        typedAvg[TimeUsageRow](_.primaryNeeds),
+        typedAvg[TimeUsageRow](_.work),
+        typedAvg[TimeUsageRow](_.other))
+      .map {case ((working, sex, age), primaryNeeds, work, other) => TimeUsageRow(working, sex, age, primaryNeeds, work, other)}
+      .orderBy("working", "sex", "age")
   }
 }
 
